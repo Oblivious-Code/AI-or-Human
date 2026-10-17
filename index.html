@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI or... Human?</title>
+    <!-- Include PeerJS Library for direct browser-to-browser connection -->
+    <script src="https://unpkg.com"></script>
     <style>
         body { font-family: Arial, sans-serif; background: #121214; color: #fff; text-align: center; margin: 0; padding: 20px; }
         .container { max-width: 500px; margin: 0 auto; background: #1e1e24; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
@@ -11,11 +13,11 @@
         button { background: #6200ee; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 6px; cursor: pointer; margin: 5px; }
         button:hover { background: #3700b3; }
         #chat-box { height: 300px; border: 1px solid #333; overflow-y: auto; background: #000; border-radius: 6px; padding: 10px; text-align: left; margin: 15px 0; }
-        .msg { margin: 5px 0; padding: 8px; border-radius: 4px; }
-        .me { background: #2e2e3a; text-align: right; }
+        .msg { margin: 5px 0; padding: 8px; border-radius: 4px; max-width: 80%; }
+        .me { background: #2e2e3a; margin-left: auto; text-align: right; }
         .them { background: #6200ee; }
         #timer { font-size: 24px; font-weight: bold; color: #ff3333; margin: 10px 0; }
-        input { width: 75%; padding: 10px; border-radius: 4px; border: 1px solid #333; background: #222; color: white; }
+        input { width: 70%; padding: 10px; border-radius: 4px; border: 1px solid #333; background: #222; color: white; }
     </style>
 </head>
 <body>
@@ -25,24 +27,32 @@
     
     <!-- LOBBY SCREEN -->
     <div id="lobby">
-        <p>Choose your round time limit to find a match:</p>
-        <button onclick="joinGame('5min')">5 Minute Mode</button>
-        <button onclick="joinGame('10min')">10 Minute Mode</button>
+        <p>Select your time limit mode:</p>
+        <button onclick="selectMode('5min')">5 Minute Mode</button>
+        <button onclick="selectMode('10min')">10 Minute Mode</button>
     </div>
 
-    <!-- WAITING SCREEN -->
-    <div id="waiting" class="hidden">
-        <p>Looking for an opponent... Please wait.</p>
+    <!-- ROOM SCREEN -->
+    <div id="room-selection" class="hidden">
+        <p id="mode-title"></p>
+        <p>To play with a friend, send them your Game ID, or paste theirs below:</p>
+        <h3>Your Game ID: <span id="my-id" style="color: #03dac6;">Generating...</span></h3>
+        
+        <div style="margin: 20px 0;">
+            <input type="text" id="opponent-id-input" placeholder="Paste Friend's ID here...">
+            <button onclick="connectToFriend()">Connect & Play</button>
+        </div>
+        <p style="font-size: 12px; color: #aaa;">Waiting for someone to connect to you...</p>
     </div>
 
     <!-- GAME SCREEN -->
     <div id="game" class="hidden">
-        <h3 id="role-display">Your Role: </h3>
+        <h3 id="role-display">Your Role: Assigning...</h3>
         <div id="timer">05:00</div>
         <div id="chat-box"></div>
         
         <div id="input-area">
-            <input type="text" id="message-input" placeholder="Type your message...">
+            <input type="text" id="message-input" placeholder="Type your message..." onkeypress="if(event.key === 'Enter') sendMessage()">
             <button onclick="sendMessage()">Send</button>
         </div>
 
@@ -50,7 +60,7 @@
         <div id="detective-controls" class="hidden" style="margin-top: 15px;">
             <p>What is your final verdict?</p>
             <button onclick="sendVerdict('ai')" style="background: #cf6679;">They are acting like an AI!</button>
-            <button onclick="sendVerdict('human')" style="background: #03dac6; color: black;">They are acting like a normal Human!</button>
+            <button onclick="sendVerdict('human')" style="background: #03dac6; color: black;">They are acting like a Human!</button>
         </div>
     </div>
 
@@ -63,60 +73,86 @@
 </div>
 
 <script>
-    let ws;
+    let peer;
+    let conn;
     let myRole = "";
+    let gameMode = "";
     let countdown;
 
-    function joinGame(mode) {
+    function selectMode(mode) {
+        gameMode = mode;
         document.getElementById('lobby').classList.add('hidden');
-        document.getElementById('waiting').classList.remove('hidden');
+        document.getElementById('room-selection').classList.remove('hidden');
+        document.getElementById('mode-title').innerText = `Mode Selected: ${mode === '5min' ? '5 Minutes' : '10 Minutes'}`;
 
-        // Connect to the local server node
-        ws = new WebSocket('ws://localhost:8080');
+        // Initialize PeerJS
+        peer = new Peer();
 
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ type: 'join', mode: mode }));
-        };
+        peer.on('open', (id) => {
+            document.getElementById('my-id').innerText = id;
+        });
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+        // Listen for an incoming friend connection
+        peer.on('connection', (incomingConn) => {
+            conn = incomingConn;
+            setupConnectionHandlers();
+            
+            // The person receiving the connection decides roles randomly
+            const isIDetective = Math.random() < 0.5;
+            myRole = isIDetective ? 'Detective' : 'Pretend-AI';
+            let opponentRole = isIDetective ? 'Pretend-AI' : 'Detective';
 
-            if (data.type === 'waiting') {
-                // Kept in lobby queue
-            } 
-            else if (data.type === 'start') {
+            // Tell the sender to start the game
+            setTimeout(() => {
+                conn.send({ type: 'start', role: opponentRole, mode: gameMode });
+                startGameUI(myRole, gameMode);
+            }, 1000);
+        });
+    }
+
+    function connectToFriend() {
+        const targetId = document.getElementById('opponent-id-input').value.trim();
+        if (!targetId) return alert("Please enter a valid Game ID.");
+
+        conn = peer.connect(targetId);
+        setupConnectionHandlers();
+    }
+
+    function setupConnectionHandlers() {
+        conn.on('open', () => {
+            // Connection successfully built
+        });
+
+        conn.on('data', (data) => {
+            if (data.type === 'start') {
                 myRole = data.role;
-                document.getElementById('waiting').classList.add('hidden');
-                document.getElementById('game').classList.remove('hidden');
-                document.getElementById('role-display').innerText = `Your Role: ${myRole}`;
-                
-                if (myRole === 'Detective') {
-                    document.getElementById('detective-controls').classList.remove('hidden');
-                }
-
-                // Start the 5-min or 10-min countdown timer
-                let totalSeconds = data.mode === '5min' ? 5 * 60 : 10 * 60;
-                startTimer(totalSeconds);
+                startGameUI(myRole, data.mode);
             } 
             else if (data.type === 'chat') {
                 appendMessage(data.text, 'them');
             } 
             else if (data.type === 'gameover') {
-                clearInterval(countdown);
-                document.getElementById('game').classList.add('hidden');
-                document.getElementById('game-over').classList.remove('hidden');
-                
-                if(data.correct) {
-                    document.getElementById('result-text').innerText = `The Detective correctly spotted the fake AI trick!`;
-                } else {
-                    document.getElementById('result-text').innerText = `The Fake AI successfully fooled the Detective!`;
-                }
+                endGame(data.correct);
             }
-            else if (data.type === 'disconnected') {
-                alert("Opponent left the room.");
-                location.reload();
-            }
-        };
+        });
+
+        conn.on('close', () => {
+            alert("Opponent disconnected.");
+            location.reload();
+        });
+    }
+
+    function startGameUI(role, mode) {
+        document.getElementById('room-selection').classList.add('hidden');
+        document.getElementById('game').classList.remove('hidden');
+        document.getElementById('role-display').innerText = `Your Role: ${role}`;
+
+        if (role === 'Detective') {
+            document.getElementById('detective-controls').classList.remove('hidden');
+        }
+
+        let totalSeconds = mode === '5min' ? 5 * 60 : 10 * 60;
+        startTimer(totalSeconds);
     }
 
     function startTimer(duration) {
@@ -134,8 +170,7 @@
             if (--timer < 0) {
                 clearInterval(countdown);
                 if (myRole === 'Detective') {
-                    // Force a guess if time runs completely out
-                    sendVerdict('human');
+                    sendVerdict('human'); // Default guess if time runs out
                 }
             }
         }, 1000);
@@ -145,7 +180,7 @@
         const input = document.getElementById('message-input');
         if (!input.value.trim()) return;
 
-        ws.send(JSON.stringify({ type: 'chat', text: input.value }));
+        conn.send({ type: 'chat', text: input.value });
         appendMessage(input.value, 'me');
         input.value = "";
     }
@@ -160,7 +195,21 @@
     }
 
     function sendVerdict(choice) {
-        ws.send(JSON.stringify({ type: 'verdict', verdict: choice }));
+        const isCorrect = choice === 'ai'; // True if detective correctly guessed the person pretending to be AI
+        conn.send({ type: 'gameover', correct: isCorrect });
+        endGame(isCorrect);
+    }
+
+    function endGame(correct) {
+        clearInterval(countdown);
+        document.getElementById('game').classList.add('hidden');
+        document.getElementById('game-over').classList.remove('hidden');
+        
+        if (correct) {
+            document.getElementById('result-text').innerText = `The Detective correctly spotted the fake AI!`;
+        } else {
+            document.getElementById('result-text').innerText = `The Player successfully fooled the Detective!`;
+        }
     }
 </script>
 </body>
